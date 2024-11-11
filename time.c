@@ -17,7 +17,7 @@ int main(int argc, char *argv[]) {
 
     struct timeval inicio, fin;
 
-    // Obtener el tiempo de inicio
+    // Se obtiene el tiempo de inicio
     if (gettimeofday(&inicio, NULL) != 0) {
         perror("Error al obtener el tiempo de inicio");
         return 1;
@@ -28,22 +28,22 @@ int main(int argc, char *argv[]) {
         perror("Error al hacer fork");
         return 1;
     } else if (pid == 0) {
-        // Proceso hijo ejecuta el comando especificado con execvp
+        // Proceso hijo que ejecuta el comando especificado con execvp
         execvp(argv[1], &argv[1]);
         perror("Error al ejecutar el comando");  // En caso de fallo
         exit(1);
     } else {
-        // Proceso padre espera a que termine el hijo
+        // Proceso padre que espera a que termine el hijo
         int estado;
         waitpid(pid, &estado, 0);
 
-        // Obtener el tiempo final
+        // Se obtiene el tiempo final
         if (gettimeofday(&fin, NULL) != 0) {
             perror("Error al obtener el tiempo final");
             return 1;
         }
 
-        // Calcular el tiempo transcurrido en segundos y microsegundos
+        // Se calcula el tiempo transcurrido en segundos y microsegundos
         double tiempo_transcurrido = (fin.tv_sec - inicio.tv_sec) + (fin.tv_usec - inicio.tv_usec) / 1000000.0;
         printf("Tiempo transcurrido: %.5f segundos\n", tiempo_transcurrido);
     }
