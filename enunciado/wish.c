@@ -8,7 +8,7 @@
 #define LONG_MAX_CMD 256
 #define MAX_ARGS 64
 
-char mensaje_error[] = "Ocurrió un error";
+char mensaje_error[] = "An error has occurred";
 
 typedef struct {
     int modo_interactivo;
