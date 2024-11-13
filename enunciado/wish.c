@@ -4,166 +4,170 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <fcntl.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 
-#define MAX_LINE 1024
-#define ERROR_MESSAGE "An error has occurred\n"
+#define MAX_ARGS 100
+#define MAX_PATHS 100
+#define MAX_BUFFER 1024
 
-// Prototipos de funciones
-void execute_command(char **args, int background, char *output_file);
-void parse_command(char *line);
-void run_shell_interactive();
-void run_shell_batch(const char *filename);
+// Estructura para manejar errores comunes
+char error_message[] = "An error has occurred\n";
 
-// Variables globales para el path
-char *path[2] = {"/bin", NULL};
-
-// Función de error para simplificar el código
+// Función para imprimir errores
 void print_error() {
-    write(STDERR_FILENO, ERROR_MESSAGE, strlen(ERROR_MESSAGE));
+    write(STDERR_FILENO, error_message, strlen(error_message));
 }
 
-// Implementación de comandos internos
-int handle_builtin(char **args) {
-    if (strcmp(args[0], "exit") == 0) {
-        if (args[1] != NULL) {
-            print_error();
-            return -1;
-        }
+// Función para dividir un string por delimitadores
+char **parse_input(char *input, int *num_args) {
+    char **args = malloc(MAX_ARGS * sizeof(char *));
+    char *token = strtok(input, " \t\n");
+    int i = 0;
+    while (token != NULL && i < MAX_ARGS - 1) {
+        args[i++] = token;
+        token = strtok(NULL, " \t\n");
+    }
+    args[i] = NULL;
+    *num_args = i;
+    return args;
+}
+
+// Comando incorporado: "exit"
+void handle_exit(char *args[]) {
+    if (args[1] != NULL) {
+        print_error();
+    } else {
         exit(0);
+    }
+}
+
+// Comando incorporado: "cd"
+void handle_cd(char *args[]) {
+    if (args[1] == NULL || chdir(args[1]) != 0) {
+        print_error();
+    }
+}
+
+// Comando incorporado: "path"
+void handle_path(char *args[], char *paths[]) {
+    int i = 1;
+    while (args[i] != NULL && i < MAX_PATHS) {
+        paths[i - 1] = args[i];
+        i++;
+    }
+    paths[i - 1] = NULL;
+}
+
+// Verifica si un comando es incorporado
+int is_builtin(char *args[], char *paths[]) {
+    if (strcmp(args[0], "exit") == 0) {
+        handle_exit(args);
+        return 1;
     } else if (strcmp(args[0], "cd") == 0) {
-        if (args[1] == NULL || args[2] != NULL) {
-            print_error();
-            return -1;
-        }
-        if (chdir(args[1]) != 0) {
-            print_error();
-        }
+        handle_cd(args);
         return 1;
     } else if (strcmp(args[0], "path") == 0) {
-        int i;
-        for (i = 0; args[i + 1] != NULL && i < 2; i++) {
-            path[i] = args[i + 1];
-        }
-        path[i] = NULL;
+        handle_path(args, paths);
         return 1;
     }
     return 0;
 }
 
-// Ejecución de comandos externos o internos con redirección y modo background
-void execute_command(char **args, int background, char *output_file) {
-    if (handle_builtin(args)) return;
-
+// Función para ejecutar comandos externos
+void execute_external(char *args[], char *paths[], int redirect, char *filename) {
     pid_t pid = fork();
-    if (pid == 0) {  // Proceso hijo
-        if (output_file) {
-            int fd = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-            if (fd == -1) {
+    if (pid == -1) {
+        print_error();
+        return;
+    }
+
+    if (pid == 0) { // Proceso hijo
+        if (redirect) { // Manejo de redirección
+            int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd == -1 || dup2(fd, STDOUT_FILENO) == -1 || dup2(fd, STDERR_FILENO) == -1) {
                 print_error();
                 exit(1);
             }
-            dup2(fd, STDOUT_FILENO);
-            dup2(fd, STDERR_FILENO);
             close(fd);
         }
 
-        for (int i = 0; path[i] != NULL; i++) {
-            char cmd_path[MAX_LINE];
-            snprintf(cmd_path, sizeof(cmd_path), "%s/%s", path[i], args[0]);
-            if (access(cmd_path, X_OK) == 0) {
-                execv(cmd_path, args);
-                print_error();
-                exit(1);
+        // Buscar el comando en las rutas proporcionadas
+        for (int i = 0; paths[i] != NULL; i++) {
+            char exec_path[MAX_BUFFER];
+            snprintf(exec_path, MAX_BUFFER, "%s/%s", paths[i], args[0]);
+            if (access(exec_path, X_OK) == 0) {
+                execv(exec_path, args);
+                break;
             }
         }
         print_error();
         exit(1);
-    } else if (pid > 0) {  // Proceso padre
-        if (!background) {
-            waitpid(pid, NULL, 0);
-        }
-    } else {
-        print_error();
     }
 }
 
-// Parseo de la línea de comando para identificar redirección y comandos en paralelo
-void parse_command(char *line) {
-    char *commands[MAX_LINE / 2];
-    int num_commands = 0;
-    char *cmd = strtok(line, "&");
-    while (cmd != NULL) {
-        commands[num_commands++] = cmd;
-        cmd = strtok(NULL, "&");
-    }
+// Procesar los comandos
+void process_command(char *input, char *paths[]) {
+    char *command = strtok(input, "&");
+    while (command != NULL) {
+        int num_args;
+        char **args = parse_input(command, &num_args);
 
-    for (int i = 0; i < num_commands; i++) {
-        char *args[MAX_LINE / 2];
-        int background = (i < num_commands - 1) ? 1 : 0;
-        char *output_file = NULL;
+        // Verificar si es un comando incorporado
+        if (!is_builtin(args, paths)) {
+            int redirect = 0;
+            char *filename = NULL;
 
-        char *redir = strstr(commands[i], ">");
-        if (redir != NULL) {
-            *redir = '\0';
-            output_file = strtok(redir + 1, " \t\n");
-            if (strtok(NULL, " \t\n") != NULL) {
-                print_error();
-                continue;
+            // Verificar si hay redirección
+            char *redir = strchr(command, '>');
+            if (redir) {
+                *redir = '\0';
+                filename = strtok(redir + 1, " \t\n");
+                redirect = 1;
             }
+
+            // Ejecutar el comando externo
+            execute_external(args, paths, redirect, filename);
         }
 
-        int arg_count = 0;
-        char *token = strtok(commands[i], " \t\n");
-        while (token != NULL && arg_count < MAX_LINE / 2) {
-            args[arg_count++] = token;
-            token = strtok(NULL, " \t\n");
-        }
-        args[arg_count] = NULL;
+        // Esperar a que el proceso hijo termine si no es en segundo plano
+        while (wait(NULL) > 0);
 
-        if (arg_count > 0) {
-            execute_command(args, background, output_file);
-        }
+        command = strtok(NULL, "&");
     }
 }
 
-// Modo interactivo
-void run_shell_interactive() {
-    char line[MAX_LINE];
+// Función principal del shell
+int main(int argc, char *argv[]) {
+    char *paths[MAX_PATHS] = {"/bin", NULL}; // Rutas por defecto
+    char buffer[MAX_BUFFER];
+    FILE *input = stdin;
+
+    // Verificar si se está ejecutando en modo batch
+    if (argc == 2) {
+        input = fopen(argv[1], "r");
+        if (!input) {
+            print_error();
+            exit(1);
+        }
+    } else if (argc > 2) {
+        print_error();
+        exit(1);
+    }
+
+    // Bucle principal
     while (1) {
-        printf("wish> ");
-        fflush(stdout);
-        if (fgets(line, MAX_LINE, stdin) == NULL) {
+        if (input == stdin) {
+            printf("wish> ");
+        }
+
+        if (!fgets(buffer, MAX_BUFFER, input)) {
             break;
         }
-        parse_command(line);
-    }
-}
 
-// Modo batch
-void run_shell_batch(const char *filename) {
-    FILE *file = fopen(filename, "r");
-    if (file == NULL) {
-        print_error();
-        exit(1);
+        process_command(buffer, paths);
     }
 
-    char line[MAX_LINE];
-    while (fgets(line, MAX_LINE, file) != NULL) {
-        parse_command(line);
-    }
-
-    fclose(file);
-}
-
-// Función principal
-int main(int argc, char *argv[]) {
-    if (argc == 1) {
-        run_shell_interactive();
-    } else if (argc == 2) {
-        run_shell_batch(argv[1]);
-    } else {
-        print_error();
-        exit(1);
-    }
+    if (input != stdin) fclose(input);
     return 0;
 }
