@@ -5,180 +5,165 @@
 #include <sys/wait.h>
 #include <fcntl.h>
 
-#define LONG_MAX_CMD 256
-#define MAX_ARGS 64
+#define MAX_LINE 1024
+#define ERROR_MESSAGE "An error has occurred\n"
 
-char mensaje_error[] = "An error has occurred";
+// Prototipos de funciones
+void execute_command(char **args, int background, char *output_file);
+void parse_command(char *line);
+void run_shell_interactive();
+void run_shell_batch(const char *filename);
 
-typedef struct {
-    int modo_interactivo;
-    char *lista_comandos[MAX_ARGS];
-    char *lista_argumentos[MAX_ARGS];
-    char *archivo_salida;
-    int usar_redireccion;
-    int numero_comando;
-    FILE *entrada;
-} InfoShell;
+// Variables globales para el path
+char *path[2] = {"/bin", NULL};
 
-InfoShell shell;
-
-void inicializarShell() {
-    shell.modo_interactivo = 1;
-    shell.usar_redireccion = 0;
-    shell.numero_comando = 0;
-    shell.entrada = stdin;
+// Función de error para simplificar el código
+void print_error() {
+    write(STDERR_FILENO, ERROR_MESSAGE, strlen(ERROR_MESSAGE));
 }
 
-void cambiarDirectorio(char **arg) {
-    if (chdir(arg[1]) == -1) {
-        fprintf(stderr, "%s\n", mensaje_error);
-    }
-}
-
-void salirShell(char **arg) {
-    if (arg[1] != NULL) {
-        fprintf(stderr, "%s\n", mensaje_error);
-    } else {
+// Implementación de comandos internos
+int handle_builtin(char **args) {
+    if (strcmp(args[0], "exit") == 0) {
+        if (args[1] != NULL) {
+            print_error();
+            return -1;
+        }
         exit(0);
+    } else if (strcmp(args[0], "cd") == 0) {
+        if (args[1] == NULL || args[2] != NULL) {
+            print_error();
+            return -1;
+        }
+        if (chdir(args[1]) != 0) {
+            print_error();
+        }
+        return 1;
+    } else if (strcmp(args[0], "path") == 0) {
+        int i;
+        for (i = 0; args[i + 1] != NULL && i < 2; i++) {
+            path[i] = args[i + 1];
+        }
+        path[i] = NULL;
+        return 1;
+    }
+    return 0;
+}
+
+// Ejecución de comandos externos o internos con redirección y modo background
+void execute_command(char **args, int background, char *output_file) {
+    if (handle_builtin(args)) return;
+
+    pid_t pid = fork();
+    if (pid == 0) {  // Proceso hijo
+        if (output_file) {
+            int fd = open(output_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd == -1) {
+                print_error();
+                exit(1);
+            }
+            dup2(fd, STDOUT_FILENO);
+            dup2(fd, STDERR_FILENO);
+            close(fd);
+        }
+
+        for (int i = 0; path[i] != NULL; i++) {
+            char cmd_path[MAX_LINE];
+            snprintf(cmd_path, sizeof(cmd_path), "%s/%s", path[i], args[0]);
+            if (access(cmd_path, X_OK) == 0) {
+                execv(cmd_path, args);
+                print_error();
+                exit(1);
+            }
+        }
+        print_error();
+        exit(1);
+    } else if (pid > 0) {  // Proceso padre
+        if (!background) {
+            waitpid(pid, NULL, 0);
+        }
+    } else {
+        print_error();
     }
 }
 
-void verificarModo(int argc, char *argv[]) {
-    if (argc == 2) {
-        shell.modo_interactivo = 0;
-        if ((shell.entrada = fopen(argv[1], "r")) == NULL) {
-            fprintf(stderr, "%s\n", mensaje_error);
-            exit(1);
+// Parseo de la línea de comando para identificar redirección y comandos en paralelo
+void parse_command(char *line) {
+    char *commands[MAX_LINE / 2];
+    int num_commands = 0;
+    char *cmd = strtok(line, "&");
+    while (cmd != NULL) {
+        commands[num_commands++] = cmd;
+        cmd = strtok(NULL, "&");
+    }
+
+    for (int i = 0; i < num_commands; i++) {
+        char *args[MAX_LINE / 2];
+        int background = (i < num_commands - 1) ? 1 : 0;
+        char *output_file = NULL;
+
+        char *redir = strstr(commands[i], ">");
+        if (redir != NULL) {
+            *redir = '\0';
+            output_file = strtok(redir + 1, " \t\n");
+            if (strtok(NULL, " \t\n") != NULL) {
+                print_error();
+                continue;
+            }
+        }
+
+        int arg_count = 0;
+        char *token = strtok(commands[i], " \t\n");
+        while (token != NULL && arg_count < MAX_LINE / 2) {
+            args[arg_count++] = token;
+            token = strtok(NULL, " \t\n");
+        }
+        args[arg_count] = NULL;
+
+        if (arg_count > 0) {
+            execute_command(args, background, output_file);
         }
     }
 }
 
-void imprimirPrompt() {
-    if (shell.modo_interactivo) {
+// Modo interactivo
+void run_shell_interactive() {
+    char line[MAX_LINE];
+    while (1) {
         printf("wish> ");
-    }
-}
-
-int separarComandos(char comando[]) {
-    char *partes = strtok(comando, "&");
-    int k = 0;
-    while (partes != NULL) {
-        shell.lista_comandos[k] = partes;
-        partes = strtok(NULL, "&");
-        k++;
-    }
-    return k;
-}
-
-void dividirComando(int indice_comando) {
-    char *arg = strtok(shell.lista_comandos[indice_comando], " \t\n");
-    int i = 0;
-    while (arg != NULL) {
-        shell.lista_argumentos[i] = arg;
-        arg = strtok(NULL, " \t\n");
-        i++;
-    }
-    shell.lista_argumentos[i] = NULL;
-}
-
-void revisarRedireccion() {
-    int j;
-    shell.usar_redireccion = 0;
-    for (j = 0; shell.lista_argumentos[j] != NULL; j++) {
-        if (strcmp(shell.lista_argumentos[j], ">") == 0) {
-            shell.usar_redireccion = 1;
-            shell.archivo_salida = shell.lista_argumentos[j + 1];
-            shell.lista_argumentos[j] = NULL;
+        fflush(stdout);
+        if (fgets(line, MAX_LINE, stdin) == NULL) {
             break;
         }
+        parse_command(line);
     }
 }
 
-int main(int argc, char *argv[]) {
-    char comando[LONG_MAX_CMD];
-    char *ruta = getenv("PATH");
-    char *copia_ruta = strdup(ruta);
-
-    inicializarShell();
-
-    if (argc > 2) {
-        fprintf(stderr, "%s\n", mensaje_error);
-        free(copia_ruta);
+// Modo batch
+void run_shell_batch(const char *filename) {
+    FILE *file = fopen(filename, "r");
+    if (file == NULL) {
+        print_error();
         exit(1);
     }
 
-    verificarModo(argc, argv);
-
-    while (1) {
-        imprimirPrompt();
-
-        if (fgets(comando, LONG_MAX_CMD, shell.entrada) == NULL) {
-            free(copia_ruta);
-            exit(0);
-        }
-
-        comando[strcspn(comando, "\n")] = '\0';
-        if (strlen(comando) == 0) {
-            continue;
-        }
-
-        int numero_comandos = separarComandos(comando);
-
-        shell.numero_comando = 0;
-        while (shell.numero_comando < numero_comandos) {
-            dividirComando(shell.numero_comando);
-
-            if (shell.lista_argumentos[0] == NULL) {
-                shell.numero_comando++;
-                continue;
-            }
-
-            revisarRedireccion();
-
-            if (strcmp(shell.lista_argumentos[0], "exit") == 0) {
-                salirShell(shell.lista_argumentos);
-            } else if (strcmp(shell.lista_argumentos[0], "cd") == 0) {
-                cambiarDirectorio(shell.lista_argumentos);
-            } else {
-                pid_t pid = fork();
-
-                if (pid == 0) {
-                    char *directorio;
-                    char *token = strtok(copia_ruta, ":");
-                    int comando_encontrado = 0;
-
-                    while (token != NULL && !comando_encontrado) {
-                        directorio = malloc(strlen(token) + strlen(shell.lista_argumentos[0]) + 2);
-                        sprintf(directorio, "%s/%s", token, shell.lista_argumentos[0]);
-
-                        if (access(directorio, X_OK) == 0) {
-                            if (shell.usar_redireccion) {
-                                int fd_salida = open(shell.archivo_salida, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
-                                if (fd_salida == -1 || dup2(fd_salida, STDOUT_FILENO) == -1) {
-                                    fprintf(stderr, "%s\n", mensaje_error);
-                                    exit(EXIT_FAILURE);
-                                }
-                            }
-                            execv(directorio, shell.lista_argumentos);
-                            perror(shell.lista_argumentos[0]);
-                            free(directorio);
-                            exit(EXIT_FAILURE);
-                        }
-                        free(directorio);
-                        token = strtok(NULL, ":");
-                    }
-                    if (!comando_encontrado) {
-                        fprintf(stderr, "%s\n", mensaje_error);
-                    }
-                    exit(EXIT_FAILURE);
-                } else if (pid < 0) {
-                    fprintf(stderr, "%s\n", mensaje_error);
-                }
-            }
-            shell.numero_comando++;
-        }
-        while (wait(NULL) > 0);
+    char line[MAX_LINE];
+    while (fgets(line, MAX_LINE, file) != NULL) {
+        parse_command(line);
     }
-    free(copia_ruta);
+
+    fclose(file);
+}
+
+// Función principal
+int main(int argc, char *argv[]) {
+    if (argc == 1) {
+        run_shell_interactive();
+    } else if (argc == 2) {
+        run_shell_batch(argv[1]);
+    } else {
+        print_error();
+        exit(1);
+    }
     return 0;
 }
